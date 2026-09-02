@@ -235,6 +235,8 @@ var DEF = {
   checkUrl:  'http://172.16.2.100:801/eportal/?c=ACSetting&a=checkScanIP',
   userField: 'DDDDD',
   passField: 'upass',
+  /* 服务器 accountPrefix=1：账号前必须带终端类型前缀，手机 ,1, / 电脑 ,0, */
+  prefix:    ',1,',
   extra:     '0MKKey=123456\nR1=0\nR2=\nR6=1\npara=00'
 };
 
@@ -252,6 +254,8 @@ var RETCODE = {
   'time is up':        '账号已到期',
   'mac error':         'MAC 地址校验失败，请关闭随机 MAC 后重试',
   'ip error':          'IP 地址异常，请断开 WiFi 重连',
+  '512':               'IP 不在校园网认证范围内，请确认已连上校园网 WiFi（而非其他网络）',
+  '512 ':              'IP 不在校园网认证范围内，请确认已连上校园网 WiFi',
   'non supported':     '当前网络不支持此认证方式',
   'limit':             '在线设备数已达上限',
   'auth fail':         '认证失败'
@@ -354,7 +358,10 @@ function saveCfg(){
 /* ---------- 构造请求体 ---------- */
 function buildBody(){
   var pairs = [];
-  pairs.push(enc(cfg.userField) + '=' + enc((cfg.user || '') + (cfg.suffix || '')));
+  /* 真实表单逻辑：DDDDD = accountPrefix + 学号 + tempAccountSuffix
+     缺了前缀服务器会认不出账号（认证失败） */
+  var pfx = (cfg.prefix === undefined || cfg.prefix === null) ? DEF.prefix : cfg.prefix;
+  pairs.push(enc(cfg.userField) + '=' + enc(pfx + (cfg.user || '') + (cfg.suffix || '')));
   pairs.push(enc(cfg.passField) + '=' + enc(cfg.pass || ''));
   (cfg.extra || '').split('\n').forEach(function(line){
     var i = line.indexOf('=');
