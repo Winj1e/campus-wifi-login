@@ -165,9 +165,20 @@ details .body li{margin:4px 0}
         <input type="password" id="f_pass" placeholder="校园网密码" autocomplete="off">
       </div>
       <div class="field">
-        <label>账号后缀（一般留空）</label>
+        <label>运营商 <span class="req">*</span> <span style="font-weight:400;color:var(--sub)">（对应登录页的下拉框）</span></label>
+        <select id="f_isp" onchange="onIspChange()">
+          <option value="">校园网 / 默认（无后缀）</option>
+          <option value="@cmcc">中国移动</option>
+          <option value="@telecom">中国电信</option>
+          <option value="@unicom">中国联通</option>
+          <option value="__custom__">自定义后缀…</option>
+        </select>
+        <div class="hint" id="ispHint">华东交通大学 Dr.COM 登录页带运营商下拉框，<b>必须选对</b>，否则服务器返回「认证失败」。不确定就选「自定义后缀」手动填真实后缀。</div>
+      </div>
+      <div class="field" id="customWrap" style="display:none">
+        <label>自定义账号后缀</label>
         <input type="text" id="f_suffix" placeholder="如 @cmcc / @telecom / @unicom" autocomplete="off">
-        <div class="hint">只有在校园网要求选择运营商时才填。多数情况留空即可。</div>
+        <div class="hint">填登录页下拉框里对应选项背后的真实后缀（含 @ 符号，如果有的话）。</div>
       </div>
     </div>
 
@@ -239,6 +250,8 @@ var DEF = {
   passField: 'upass',
   /* 服务器 accountPrefix=1：账号前必须带终端类型前缀，手机 ,1, / 电脑 ,0, */
   prefix:    ',1,',
+  /* 运营商后缀：对应登录页「运营商」下拉框，选错服务器返回「认证失败」 */
+  isp:       '',
   extra:     '0MKKey=123456\nR1=0\nR2=\nR6=1\npara=00'
 };
 
@@ -307,6 +320,7 @@ function loadCfg(){
   try { c = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch(e){ c = {}; }
   // 与默认值合并，新增字段自动补全
   for(var k in DEF){ if(!(k in c)) c[k] = DEF[k]; }
+  if(c.suffix && !c.isp) c.isp = '__custom__';   // 老用户曾手动填后缀 → 迁移到自定义
   return c;
 }
 function persist(){
@@ -351,6 +365,10 @@ function backToMain(){
 function fillCfg(){
   $('f_user').value      = cfg.user || '';
   $('f_pass').value      = cfg.pass || '';
+  // 运营商下拉
+  var ispVal = (cfg.isp === '__custom__') ? '__custom__' : (cfg.isp || '');
+  $('f_isp').value = ispVal;
+  $('customWrap').style.display = (ispVal === '__custom__') ? 'block' : 'none';
   $('f_suffix').value    = cfg.suffix || '';
   $('f_auto').checked    = cfg.auto !== false;
   $('f_loginUrl').value  = cfg.loginUrl;
@@ -359,6 +377,11 @@ function fillCfg(){
   $('f_passField').value = cfg.passField;
   $('f_extra').value     = cfg.extra;
   $('btnBack').textContent = cfg.user ? '返回' : '稍后再填';
+}
+function onIspChange(){
+  var v = $('f_isp').value;
+  $('customWrap').style.display = (v === '__custom__') ? 'block' : 'none';
+  if(v !== '__custom__') $('f_suffix').value = '';
 }
 function resetAdv(){
   cfg.loginUrl = DEF.loginUrl; cfg.checkUrl = DEF.checkUrl;
@@ -375,7 +398,9 @@ function saveCfg(){
 
   cfg.user      = user;
   cfg.pass      = pass;
-  cfg.suffix    = $('f_suffix').value.trim();
+  var ispVal = $('f_isp').value;
+  cfg.isp       = ispVal;
+  cfg.suffix    = (ispVal === '__custom__') ? $('f_suffix').value.trim() : '';
   cfg.auto      = $('f_auto').checked;
   cfg.loginUrl  = ($('f_loginUrl').value.trim()  || DEF.loginUrl);
   cfg.checkUrl  = ($('f_checkUrl').value.trim()  || DEF.checkUrl);
@@ -395,7 +420,9 @@ function buildBody(){
   /* 真实表单逻辑：DDDDD = accountPrefix + 学号 + tempAccountSuffix
      缺了前缀服务器会认不出账号（认证失败） */
   var pfx = (cfg.prefix === undefined || cfg.prefix === null) ? DEF.prefix : cfg.prefix;
-  pairs.push(enc(cfg.userField) + '=' + enc(pfx + (cfg.user || '') + (cfg.suffix || '')));
+  // 运营商后缀：下拉框选中的值直接拼到账号后面（与 Dr.COM setISP() 行为一致）
+  var suffix = (cfg.isp === '__custom__') ? (cfg.suffix || '') : (cfg.isp || '');
+  pairs.push(enc(cfg.userField) + '=' + enc(pfx + (cfg.user || '') + suffix));
   pairs.push(enc(cfg.passField) + '=' + enc(cfg.pass || ''));
   (cfg.extra || '').split('\n').forEach(function(line){
     var i = line.indexOf('=');
@@ -563,7 +590,8 @@ function refreshMain(){
     return;
   }
   $('btnLogin').textContent = '立即登录';
-  setStatus('账号 ' + esc(cfg.user + (cfg.suffix || '')));
+  var op = (cfg.isp === '__custom__') ? (cfg.suffix || '(未填后缀)') : (cfg.isp || '校园网(无后缀)');
+  setStatus('账号 ' + esc(cfg.user) + ' · 运营商 ' + esc(op));
   var tip = '<b>小提示：</b>在浏览器菜单里选「添加到主屏幕」，之后点桌面图标就能直接登录';
   if(cfg.lastLogin){
     var d = new Date(cfg.lastLogin);
