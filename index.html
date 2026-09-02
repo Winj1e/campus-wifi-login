@@ -144,6 +144,7 @@ details .body li{margin:4px 0}
     <button class="btn btn-primary" id="btnLogin" onclick="doLogin()">立即登录</button>
     <button class="btn btn-ghost" onclick="showCfg()">修改配置</button>
 
+    <div class="mini" id="portalInfo" style="margin-top:10px;opacity:.8"></div>
     <div class="tip" id="tipBox"></div>
   </div>
 
@@ -231,7 +232,8 @@ details .body li{margin:4px 0}
 <script>
 /* ================= 预置配置（华东交通大学 Dr.COM 城市热点） ================= */
 var DEF = {
-  loginUrl:  'http://172.16.2.100:801/eportal/?c=ACSetting&a=Login',
+  /* 登录接口（已带上 Dr.COM 必须的 AC 定位参数；wlanuserip 由 App 从 captive 重定向里动态注入） */
+  loginUrl:  'http://172.16.2.100:801/eportal/?c=ACSetting&a=Login&protocol=http:&hostname=172.16.2.100&port=&iTermType=2&wlanacip=172.16.1.2&wlanacname=ecjtu_nic_ME60&enAdvert=0&queryACIP=0&loginMethod=1',
   checkUrl:  'http://172.16.2.100:801/eportal/?c=ACSetting&a=checkScanIP',
   userField: 'DDDDD',
   passField: 'upass',
@@ -239,6 +241,38 @@ var DEF = {
   prefix:    ',1,',
   extra:     '0MKKey=123456\nR1=0\nR2=\nR6=1\npara=00'
 };
+
+/* 由 App 注入的 portal 参数（来自 captive 重定向，含当前校园网 IP） */
+var PORTAL = (function(){
+  try {
+    var h = (location.hash || '').replace(/^#/, '');
+    if (h && h.indexOf('wlanuserip') >= 0) {
+      var q = new URLSearchParams(h.charAt(0) === '?' ? h.slice(1) : h);
+      return { wlanuserip: q.get('wlanuserip'), wlanacip: q.get('wlanacip'), wlanacname: q.get('wlanacname') };
+    }
+  } catch (e) {}
+  return (typeof window.__portal !== 'undefined' && window.__portal) || {};
+})();
+
+/* 把 portal 动态参数拼进 URL（wlanuserip 缺失时让服务器按源 IP 自动识别） */
+function withPortal(base, keys){
+  keys = keys || ['wlanuserip'];
+  var has = base.indexOf('?') > 0 ? '&' : '?';
+  var add = '';
+  keys.forEach(function(k){
+    if (PORTAL[k]) add += (add ? '&' : has) + k + '=' + encodeURIComponent(PORTAL[k]);
+  });
+  return add ? base + add : base;
+}
+
+/* App 捕获到 portal 参数后回调，刷新界面提示 */
+function onPortalCaptured(p){
+  PORTAL = p || PORTAL;
+  var el = document.getElementById('portalInfo');
+  if (el) el.textContent = PORTAL.wlanuserip ? ('已捕获校园网 IP：' + PORTAL.wlanuserip) : '已就绪（将按源 IP 自动识别）';
+}
+if (typeof window.onPortal === 'undefined') window.onPortal = onPortalCaptured;
+if (window.__portal) onPortalCaptured(window.__portal);
 
 /* 服务器返回码 → 中文说明 */
 var RETCODE = {
@@ -372,7 +406,8 @@ function buildBody(){
 
 /* ---------- 在线检测 ---------- */
 function checkOnline(){
-  return fetch(cfg.checkUrl, {
+  var url = withPortal(cfg.checkUrl, ['wlanuserip']);
+  return fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: '',
@@ -414,16 +449,22 @@ function doLogin(){
         return;
       }
       setStatus('正在确认登录结果…');
-      return wait(1200).then(checkOnline).then(function(ok){
+      return wait(1500).then(checkOnline).then(function(ok){
         busy = false; btn.disabled = false; btn.textContent = '立即登录';
         if(ok){
           markLogin();
           setStatus('登录成功');
           showResult('ok', '<b>登录成功</b>，可以上网了。');
         } else {
-          var msg = info.retMsg || '未知原因';
+          var msg = info.retMsg || '认证失败';
+          var hint = '';
+          if(/512|ip error/i.test(info.retCode || '') || /512|ip error/i.test(msg)) {
+            hint = '<br><br>多为「IP 不在认证范围」：请确认连的是<strong>校园网 WiFi</strong>（不是宿舍宽带/其他 WiFi）；若已连对，尝试断开重连一次。';
+          } else if(/mac error/i.test(msg)) {
+            hint = '<br><br>请到 WiFi 设置里关闭「随机 MAC / 私有 MAC」，改用设备 MAC 后重试。';
+          }
           setStatus('登录失败');
-          showResult('err', '<b>登录失败</b>：' + msg + '<br>请检查学号和密码是否正确。',
+          showResult('err', '<b>登录失败</b>：' + msg + hint,
                      info.retCode ? 'RetCode = ' + info.retCode : '');
         }
       });
@@ -445,7 +486,8 @@ function wait(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
 /* 优先用 fetch 静默提交；失败则退回表单提交（跳转到学校结果页） */
 function submitLogin(){
   var body = buildBody();
-  return fetch(cfg.loginUrl, {
+  var url = withPortal(cfg.loginUrl, ['wlanuserip']);
+  return fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: body,
