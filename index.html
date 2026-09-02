@@ -201,6 +201,11 @@ details .body li{margin:4px 0}
           <input type="url" id="f_loginUrl" autocomplete="off">
         </div>
         <div class="field">
+          <label>门户 URL（可选 · 仍「认证失败」时用它救场）</label>
+          <input type="url" id="f_portalUrl" autocomplete="off" placeholder="连上校园网后浏览器自动跳出的登录页整条地址">
+          <div class="hint">手机连上校园网 WiFi 后，浏览器会被自动跳到一个 <b>登录页</b>。把那个页面的<b>整条地址</b>（通常以 <code>172.16.2.100:801/eportal/</code> 开头、且带 <code>wlanuserip=</code>）复制填这里。它会自带所有正确参数，直接用于登录，绕过自动获取失败的问题。</div>
+        </div>
+        <div class="field">
           <label>在线检测接口地址</label>
           <input type="url" id="f_checkUrl" autocomplete="off">
         </div>
@@ -248,6 +253,7 @@ var DEF = {
   checkUrl:  'http://172.16.2.100:801/eportal/?c=ACSetting&a=checkScanIP',
   userField: 'DDDDD',
   passField: 'upass',
+  portalUrl: '',
   /* 服务器 accountPrefix=1：账号前必须带终端类型前缀，手机 ,1, / 电脑 ,0, */
   prefix:    ',1,',
   /* 运营商后缀：对应登录页「运营商」下拉框，选错服务器返回「认证失败」 */
@@ -255,34 +261,95 @@ var DEF = {
   extra:     '0MKKey=123456\nR1=0\nR2=\nR6=1\npara=00'
 };
 
-/* 由 App 注入的 portal 参数（来自 captive 重定向，含当前校园网 IP） */
-var PORTAL = (function(){
+/* 由 App 注入 / URL hash / 手动粘贴 的 portal 参数（来自 captive 重定向，
+   含当前校园网 IP、会话、AC 定位信息）。真实 Dr.COM 登录必须把这些参数拼进请求，
+   缺了 wlanuserip / session 服务器无法绑定会话 → 返回「认证失败」。 */
+var PORTAL = {};
+var PORTAL_LOCK = {};   // 手动「门户URL」提供的字段，自动捕获不覆盖
+(function(){
+  function merge(obj){ if(obj && typeof obj==='object'){ for(var k in obj){ if(obj[k]) PORTAL[k]=obj[k]; } } }
+  // 1) App 注入的捕获对象（MainActivity 已通抓全部 query 参数）
+  if (typeof window.__portal !== 'undefined' && window.__portal) merge(window.__portal);
+  // 2) URL hash：可能是完整 URL（#http://...?wlanuserip=...）或纯 query 串（#wlanuserip=...&...）
   try {
     var h = (location.hash || '').replace(/^#/, '');
-    if (h && h.indexOf('wlanuserip') >= 0) {
-      var q = new URLSearchParams(h.charAt(0) === '?' ? h.slice(1) : h);
-      return { wlanuserip: q.get('wlanuserip'), wlanacip: q.get('wlanacip'), wlanacname: q.get('wlanacname') };
+    if (h) {
+      var qi = h.indexOf('?');
+      var qstr = qi >= 0 ? h.slice(qi + 1) : h;
+      if (qstr.indexOf('=') >= 0) {
+        qstr.split('&').forEach(function(pair){
+          var i = pair.indexOf('='); if (i < 0) return;
+          var k = decodeURIComponent(pair.slice(0, i));
+          var v = decodeURIComponent(pair.slice(i + 1));
+          if (k) PORTAL[k] = v;
+        });
+      }
     }
   } catch (e) {}
-  return (typeof window.__portal !== 'undefined' && window.__portal) || {};
 })();
 
-/* 把 portal 动态参数拼进 URL（wlanuserip 缺失时让服务器按源 IP 自动识别） */
+/* 真实 Dr.COM 登录 URL 需要的全部动态参数（顺序无关，键名固定） */
+var PORTAL_KEYS = ['wlanuserip','wlanacip','wlanacname','redirect','session','vlanid','mac','ip','port','iTermType','protocol','hostname'];
+
+/* 把 portal 动态参数拼进 URL：捕获到的值【覆盖】默认值（如硬编码的 wlanacip/wlanacname）；
+   缺失字段保持默认值；无任何捕获时服务器按源 IP 自动识别。 */
 function withPortal(base, keys){
-  keys = keys || ['wlanuserip'];
-  var has = base.indexOf('?') > 0 ? '&' : '?';
-  var add = '';
-  keys.forEach(function(k){
-    if (PORTAL[k]) add += (add ? '&' : has) + k + '=' + encodeURIComponent(PORTAL[k]);
-  });
-  return add ? base + add : base;
+  keys = keys || PORTAL_KEYS;
+  try {
+    var mm = base.match(/^([^?]+)(\?(.*))?$/);
+    var path = mm[1];
+    var q = {};
+    if (mm[3]) {
+      mm[3].split('&').forEach(function(p){
+        if (!p) return;
+        var i = p.indexOf('=');
+        var k = i < 0 ? p : decodeURIComponent(p.slice(0, i));
+        if (!(k in q)) q[k] = (i < 0 ? '' : decodeURIComponent(p.slice(i + 1)));
+      });
+    }
+    keys.forEach(function(k){ if (PORTAL[k] != null && PORTAL[k] !== '') q[k] = PORTAL[k]; });
+    var parts = [];
+    for (var k in q) parts.push(encodeURIComponent(k) + '=' + encodeURIComponent(q[k]));
+    return path + '?' + parts.join('&');
+  } catch (e) { return base; }
 }
 
-/* App 捕获到 portal 参数后回调，刷新界面提示 */
+/* 手动粘贴的「门户URL」优先：直接作为登录 action；其参数也并入 PORTAL 且加锁不被自动捕获覆盖 */
+function mergePortalUrl(str){
+  if (!str) return;
+  try {
+    var qi = str.indexOf('?');
+    var q = qi >= 0 ? str.slice(qi + 1) : str;
+    q.split('&').forEach(function(p){
+      if (!p) return;
+      var i = p.indexOf('='); if (i < 0) return;
+      var k = decodeURIComponent(p.slice(0, i));
+      var v = decodeURIComponent(p.slice(i + 1));
+      if (k) { PORTAL[k] = v; PORTAL_LOCK[k] = true; }
+    });
+  } catch (e) {}
+}
+
+/* 登录请求的真实 action：填了「门户URL」就直接用（它已含全部 AC 定位参数）；
+   否则用内置地址 + 动态参数覆盖。 */
+function loginActionUrl(){
+  if (cfg && cfg.portalUrl) return String(cfg.portalUrl).split('#')[0];
+  return withPortal(cfg ? cfg.loginUrl : DEF.loginUrl, PORTAL_KEYS);
+}
+function checkActionUrl(){
+  if (cfg && cfg.portalUrl) return String(cfg.portalUrl).split('#')[0].replace(/a=Login/i, 'a=checkScanIP');
+  return withPortal(cfg ? cfg.checkUrl : DEF.checkUrl, PORTAL_KEYS);
+}
+
+/* App 捕获到 portal 参数后回调，刷新界面提示（手动门户URL锁定的字段不覆盖） */
 function onPortalCaptured(p){
-  PORTAL = p || PORTAL;
+  p = p || {};
+  for (var k in p) { if (!(k in PORTAL_LOCK)) PORTAL[k] = p[k]; }
   var el = document.getElementById('portalInfo');
-  if (el) el.textContent = PORTAL.wlanuserip ? ('已捕获校园网 IP：' + PORTAL.wlanuserip) : '已就绪（将按源 IP 自动识别）';
+  var got = PORTAL.wlanuserip || PORTAL.session || PORTAL.wlanacname;
+  if (el) el.textContent = got
+    ? ('已捕获校园网信息：' + (PORTAL.wlanuserip || '?') + (PORTAL.wlanacname ? ' @ ' + PORTAL.wlanacname : ''))
+    : '已就绪（将按源 IP 自动识别）';
 }
 if (typeof window.onPortal === 'undefined') window.onPortal = onPortalCaptured;
 if (window.__portal) onPortalCaptured(window.__portal);
@@ -372,6 +439,7 @@ function fillCfg(){
   $('f_suffix').value    = cfg.suffix || '';
   $('f_auto').checked    = cfg.auto !== false;
   $('f_loginUrl').value  = cfg.loginUrl;
+  $('f_portalUrl').value = cfg.portalUrl || '';
   $('f_checkUrl').value  = cfg.checkUrl;
   $('f_userField').value = cfg.userField;
   $('f_passField').value = cfg.passField;
@@ -384,7 +452,7 @@ function onIspChange(){
   if(v !== '__custom__') $('f_suffix').value = '';
 }
 function resetAdv(){
-  cfg.loginUrl = DEF.loginUrl; cfg.checkUrl = DEF.checkUrl;
+  cfg.loginUrl = DEF.loginUrl; cfg.checkUrl = DEF.checkUrl; cfg.portalUrl = '';
   cfg.userField = DEF.userField; cfg.passField = DEF.passField; cfg.extra = DEF.extra;
   fillCfg();
   toast('已恢复默认参数');
@@ -403,6 +471,7 @@ function saveCfg(){
   cfg.suffix    = (ispVal === '__custom__') ? $('f_suffix').value.trim() : '';
   cfg.auto      = $('f_auto').checked;
   cfg.loginUrl  = ($('f_loginUrl').value.trim()  || DEF.loginUrl);
+  cfg.portalUrl = $('f_portalUrl').value.trim();
   cfg.checkUrl  = ($('f_checkUrl').value.trim()  || DEF.checkUrl);
   cfg.userField = ($('f_userField').value.trim() || DEF.userField);
   cfg.passField = ($('f_passField').value.trim() || DEF.passField);
@@ -433,7 +502,7 @@ function buildBody(){
 
 /* ---------- 在线检测 ---------- */
 function checkOnline(){
-  var url = withPortal(cfg.checkUrl, ['wlanuserip']);
+  var url = checkActionUrl();
   return fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -513,7 +582,7 @@ function wait(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
 /* 优先用 fetch 静默提交；失败则退回表单提交（跳转到学校结果页） */
 function submitLogin(){
   var body = buildBody();
-  var url = withPortal(cfg.loginUrl, ['wlanuserip']);
+  var url = loginActionUrl();
   return fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -542,7 +611,7 @@ function formSubmit(body){
   var f = $('postForm');
   f.innerHTML = '';
   f.method = 'POST';
-  f.action = cfg.loginUrl;
+  f.action = loginActionUrl();
   body.split('&').forEach(function(p){
     var i = p.indexOf('=');
     if(i < 0) return;
@@ -621,6 +690,7 @@ function clearAll(){
 
 /* ---------- 启动 ---------- */
 cfg = loadCfg();
+mergePortalUrl(cfg.portalUrl);   // 手动门户URL优先，其参数加锁不被自动捕获覆盖
 showMain();
 </script>
 </body>
