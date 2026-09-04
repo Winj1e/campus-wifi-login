@@ -144,7 +144,9 @@ details .body li{margin:4px 0}
     <button class="btn btn-primary" id="btnLogin" onclick="doLogin()">立即登录</button>
     <button class="btn btn-ghost" onclick="showCfg()">修改配置</button>
     <button class="btn btn-line" id="btnOfficial" onclick="doOfficial()" style="margin-top:10px">用学校官方登录页登录（最稳）</button>
+    <button class="btn btn-ghost" onclick="reprobe()" style="margin-top:4px">↻ 重新检测 WiFi / Portal</button>
 
+    <div id="wifiBox" class="tip" style="margin-top:14px;display:none"></div>
     <div class="mini" id="portalInfo" style="margin-top:10px;opacity:.8"></div>
     <div class="tip" id="tipBox"></div>
   </div>
@@ -372,6 +374,54 @@ function onPortalCaptured(p){
 if (typeof window.onPortal === 'undefined') window.onPortal = onPortalCaptured;
 if (window.__portal) onPortalCaptured(window.__portal);
 
+/* ---------- 读取设备网卡 IP（关键修复：之前 WebView 走 4G 拿不到 captive 参数） ---------- */
+var WIFI = {wifi:false, internet:false, iface:null, ip:null};
+function loadWifiInfo(){
+  try {
+    if (window.AndroidBridge && AndroidBridge.getWifiInfo){
+      var info = JSON.parse(AndroidBridge.getWifiInfo() || '{}');
+      WIFI.wifi     = !!info.wifi;
+      WIFI.internet = !!info.internet;
+      WIFI.iface    = info.iface || null;
+      WIFI.ip       = info.ip    || null;
+      if (WIFI.ip){
+        /* 用网卡 IP 覆盖 wlanuserip / ip，绕过 captive 探测失败的坑 */
+        if (!PORTAL_LOCK.wlanuserip) PORTAL.wlanuserip = WIFI.ip;
+        if (!PORTAL_LOCK.ip)         PORTAL.ip         = WIFI.ip;
+      }
+    }
+  } catch(e){ console.error(e); }
+  renderWifiBox();
+}
+function renderWifiBox(){
+  var box = document.getElementById('wifiBox');
+  if (!box) return;
+  if (!WIFI.wifi){
+    box.style.display = 'block';
+    box.innerHTML = '<b style="color:var(--danger)">⚠ 未检测到 WiFi 连接</b><br>'
+      + '请先在系统设置里<b>连接校园网 WiFi</b>（不要只打开流量），然后点下面的「重新检测」按钮。';
+  } else if (!WIFI.ip){
+    box.style.display = 'block';
+    box.innerHTML = '<b style="color:var(--warn)">⚠ WiFi 已连但没拿到 IP</b><br>'
+      + '可能是 WiFi 还没拿到 DHCP。断开重连一次，或点下面的「重新检测」。';
+  } else if (!WIFI.internet){
+    box.style.display = 'block';
+    box.innerHTML = '<b style="color:var(--warn)">⚠ WiFi 已连，但未通过认证</b><br>'
+      + '当前网卡 IP <code>' + esc(WIFI.ip) + '</code>（将作为 wlanuserip 提交）。<br>'
+      + '可以点「立即登录」直接提交认证；如果失败，再点「重新检测」。';
+  } else {
+    box.style.display = 'block';
+    box.innerHTML = '<b style="color:var(--ok)">✓ WiFi 已认证</b>　IP <code>' + esc(WIFI.ip) + '</code>';
+  }
+}
+function reprobe(){
+  /* 先刷新网卡 IP（WebView 走 4G 的话 captive 探测必然失败，但网卡 IP 是真实的） */
+  loadWifiInfo();
+  /* 再让 App 重跑 captive 探测（如果 WiFi 已认证说不定能拿到更全的 session/redirect） */
+  try { if (window.AndroidBridge && AndroidBridge.reprobe) AndroidBridge.reprobe(); } catch(e){}
+  toast('已重新检测');
+}
+
 /* 服务器返回码 → 中文说明 */
 var RETCODE = {
   '1':                 '登录成功',
@@ -434,6 +484,7 @@ function clearResult(){ $('result').className = ''; $('result').innerHTML = ''; 
 function showMain(){
   $('viewCfg').hidden = true;
   $('viewMain').hidden = false;
+  loadWifiInfo();   // 每次回到主界面都重新读一次（WiFi 可能刚连上）
   refreshMain();
 }
 function showCfg(){
@@ -535,6 +586,18 @@ function checkOnline(){
 function doLogin(){
   if(busy) return;
   if(!cfg.user){ showCfg(); return; }
+  /* 每次登录前刷新一次网卡 IP（防止中途切换网络） */
+  loadWifiInfo();
+  if (!WIFI.wifi){
+    busy = false;
+    setStatus('未连接 WiFi');
+    showResult('warn',
+      '<b>没检测到 WiFi 连接</b><br>'
+      + '请先在系统设置里连上<b>校园网 WiFi</b>（不要只用流量），<br>'
+      + '然后点页面下方「↻ 重新检测 WiFi / Portal」。',
+      '当前 WIFI = ' + JSON.stringify(WIFI));
+    return;
+  }
   cancelAuto();
   busy = true;
   clearResult();
@@ -752,6 +815,7 @@ function clearAll(){
 /* ---------- 启动 ---------- */
 cfg = loadCfg();
 mergePortalUrl(cfg.portalUrl);   // 手动门户URL优先，其参数加锁不被自动捕获覆盖
+loadWifiInfo();                  // 关键修复：启动即读 wlan0 IP 作为 wlanuserip
 showMain();
 </script>
 </body>
