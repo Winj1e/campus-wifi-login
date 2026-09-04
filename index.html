@@ -569,17 +569,34 @@ function buildBody(){
   return pairs.join('&');
 }
 
-/* ---------- 在线检测 ---------- */
+/* ---------- 在线检测（优先用 Java 桥强制走 WiFi，避免 WebView 默认走 4G） ---------- */
 function checkOnline(){
   var url = checkActionUrl();
-  return fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: '',
-    cache: 'no-store'
-  }).then(function(r){ return r.json(); })
+  if (window.AndroidBridge && AndroidBridge.doCheck) {
+    return new Promise(function(resolve){
+      try {
+        var json = AndroidBridge.doCheck(url);
+        var r = JSON.parse(json || '{}');
+        if (r.ok){
+          /* 在线 = 200 且 RetCode=1（已登录状态） */
+          var ret = parseRet(r.url);
+          if (!ret.code){
+            /* 也可能服务器直接返回 JSON 状态 */
+            var m = /"RetCode"\s*:\s*"([^"]+)"/.exec(r.body || '');
+            if (m) ret = parseRet('?RetCode=' + m[1]);
+          }
+          resolve(ret.code === '1');
+        } else {
+          resolve(false);
+        }
+      } catch (e){ resolve(false); }
+    });
+  }
+  /* 网页版降级：走 fetch */
+  return fetch(url, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'', cache:'no-store'})
+    .then(function(r){ return r.json(); })
     .then(function(j){ return !!(j && j.result === 'ok'); })
-    .catch(function(){ return false; });   // 检测不到就当作未登录，继续尝试
+    .catch(function(){ return false; });
 }
 
 /* ---------- 登录 ---------- */
@@ -641,11 +658,12 @@ function doLogin(){
             hint = '<br><br>请到 WiFi 设置里关闭「随机 MAC / 私有 MAC」，改用设备 MAC 后重试。';
           }
           setStatus('登录失败');
-          /* 带上真实请求地址与捕获到的 portal 参数，方便直接定位问题 */
+          /* 带上真实请求地址、捕获到的 portal 参数、本机源 IP（验证是否走了 WiFi） */
           var diag = [];
           if (info.retCode) diag.push('RetCode = ' + esc(info.retCode));
           if (info.actionUrl) diag.push('请求地址：' + esc(info.actionUrl));
           diag.push('Portal参数：' + esc(portalBrief() || '(未捕获到)'));
+          if (info.localIp) diag.push('请求源 IP：' + esc(info.localIp) + (info.wifiBound ? '（✓ 走 WiFi）' : '（⚠ 未绑定 WiFi）'));
           showResult('err', '<b>登录失败</b>：' + msg + hint, diag.join('<br>'));
         }
       });
@@ -664,10 +682,40 @@ function markLogin(){
 
 function wait(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
 
-/* 优先用 fetch 静默提交；失败则退回表单提交（跳转到学校结果页） */
+/* 优先用 Java 桥强制走 WiFi 发 POST（让源 IP = 校园网 IP）；
+   失败再退到 fetch / 表单提交 */
 function submitLogin(){
   var body = buildBody();
   var url = loginActionUrl();
+  if (window.AndroidBridge && AndroidBridge.doLogin){
+    return new Promise(function(resolve){
+      try {
+        var json = AndroidBridge.doLogin(url, body);
+        var r = JSON.parse(json || '{}');
+        if (!r.ok){
+          /* Java 桥失败（无 WiFi / socket 错误）→ 退到 form submit */
+          formSubmit(body);
+          resolve({fellBack:true, actionUrl:url});
+          return;
+        }
+        var ret = parseRet(r.url);
+        if (!ret.code){
+          var m = /"RetCode"\s*:\s*"([^"]+)"/.exec(r.body || '') || /RetCode=([^&"\s]+)/.exec(r.body || '');
+          if (m) ret = parseRet('?RetCode=' + m[1]);
+        }
+        resolve({
+          url: r.url, retCode: ret.code, retMsg: ret.msg,
+          netFail:false, actionUrl:url,
+          wifiBound: !!r.wifiBound, localIp: r.localIp || null,
+          raw: r.body || ''
+        });
+      } catch(e){
+        formSubmit(body);
+        resolve({fellBack:true, actionUrl:url, error:String(e)});
+      }
+    });
+  }
+  /* 网页版：fetch（可能被 CORS 挡住导致拿不到 RetCode） */
   return fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -679,7 +727,6 @@ function submitLogin(){
     var ret = parseRet(u);
     return { url: u, retCode: ret.code, retMsg: ret.msg, netFail: false, actionUrl: url };
   }).catch(function(){
-    // fetch 走不通（跨域 / 混合内容 / 网络不可达）→ 用表单提交，让浏览器自己跳结果页
     formSubmit(body);
     return { fellBack: true };
   });
