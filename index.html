@@ -143,6 +143,7 @@ details .body li{margin:4px 0}
 
     <button class="btn btn-primary" id="btnLogin" onclick="doLogin()">立即登录</button>
     <button class="btn btn-ghost" onclick="showCfg()">修改配置</button>
+    <button class="btn btn-line" id="btnOfficial" onclick="doOfficial()" style="margin-top:10px">用学校官方登录页登录（最稳）</button>
 
     <div class="mini" id="portalInfo" style="margin-top:10px;opacity:.8"></div>
     <div class="tip" id="tipBox"></div>
@@ -291,10 +292,27 @@ var PORTAL_LOCK = {};   // 手动「门户URL」提供的字段，自动捕获�
 /* 真实 Dr.COM 登录 URL 需要的全部动态参数（顺序无关，键名固定） */
 var PORTAL_KEYS = ['wlanuserip','wlanacip','wlanacname','redirect','session','vlanid','mac','ip','port','iTermType','protocol','hostname'];
 
+/* 按 a41.js getCurrMAC() 语义：12 位 mac 转成 xx-xx-xx-xx-xx-xx */
+function dashMac(m){
+  m = String(m).replace(/-/g, '').replace(/:/g, '');
+  if (m.length !== 12) return m;
+  return m.substr(0,2)+'-'+m.substr(2,2)+'-'+m.substr(4,2)+'-'+m.substr(6,2)+'-'+m.substr(8,2)+'-'+m.substr(10,2);
+}
+/* 补全真实门户一定会带的两个字段（之前漏了，服务器因此无法绑定会话 → AC认证失败）：
+   - ip  = getQueryString('ip','wlanuserip') || ss5  → 有 wlanuserip 时恒等于它
+   - mac = getQueryString('mac','usermac','wlanusermac') || ss4('000000000000')
+   真实门户【总是】发送这两个字段。 */
+function normalizePortal(){
+  if (PORTAL.wlanuserip && !PORTAL.ip) PORTAL.ip = PORTAL.wlanuserip;
+  var m = PORTAL.mac || PORTAL.usermac || PORTAL.wlanusermac;
+  PORTAL.mac = dashMac(m && m !== 'null' && m !== 'undefined' ? m : '000000000000');
+}
+
 /* 把 portal 动态参数拼进 URL：捕获到的值【覆盖】默认值（如硬编码的 wlanacip/wlanacname）；
    缺失字段保持默认值；无任何捕获时服务器按源 IP 自动识别。 */
 function withPortal(base, keys){
   keys = keys || PORTAL_KEYS;
+  normalizePortal();
   try {
     var mm = base.match(/^([^?]+)(\?(.*))?$/);
     var path = mm[1];
@@ -560,8 +578,12 @@ function doLogin(){
             hint = '<br><br>请到 WiFi 设置里关闭「随机 MAC / 私有 MAC」，改用设备 MAC 后重试。';
           }
           setStatus('登录失败');
-          showResult('err', '<b>登录失败</b>：' + msg + hint,
-                     info.retCode ? 'RetCode = ' + info.retCode : '');
+          /* 带上真实请求地址与捕获到的 portal 参数，方便直接定位问题 */
+          var diag = [];
+          if (info.retCode) diag.push('RetCode = ' + esc(info.retCode));
+          if (info.actionUrl) diag.push('请求地址：' + esc(info.actionUrl));
+          diag.push('Portal参数：' + esc(portalBrief() || '(未捕获到)'));
+          showResult('err', '<b>登录失败</b>：' + msg + hint, diag.join('<br>'));
         }
       });
     });
@@ -592,12 +614,51 @@ function submitLogin(){
   }).then(function(r){
     var u = r.url || '';
     var ret = parseRet(u);
-    return { url: u, retCode: ret.code, retMsg: ret.msg, netFail: false };
+    return { url: u, retCode: ret.code, retMsg: ret.msg, netFail: false, actionUrl: url };
   }).catch(function(){
     // fetch 走不通（跨域 / 混合内容 / 网络不可达）→ 用表单提交，让浏览器自己跳结果页
     formSubmit(body);
     return { fellBack: true };
   });
+}
+
+/* ---------- 官方登录页通道（App 内可用，最稳） ----------
+   直接打开学校真实的门户页，把账号密码填进真实表单并触发门户自己的 JS。
+   所有参数（mac/ip/session/redirect/前缀/后缀）都由门户自己算，100% 与浏览器一致。 */
+function doOfficial(){
+  if(!cfg.user){ showCfg(); return; }
+  if(!(window.AndroidBridge && window.AndroidBridge.official)){
+    toast('官方页通道仅在 App 内可用，网页版请用「立即登录」');
+    return;
+  }
+  cancelAuto();
+  var isp = (cfg.isp === '__custom__') ? (cfg.suffix || '') : (cfg.isp || '');
+  setStatus('正在打开学校官方登录页…');
+  showResult('warn', '已打开学校官方登录页，正在自动填入账号密码并提交。<br>若没自动提交，请手动点一下登录按钮。');
+  try {
+    window.AndroidBridge.official(String(cfg.user), String(cfg.pass || ''), String(isp));
+  } catch (e) {
+    showResult('err', '调用官方登录页失败：' + (e && e.message ? e.message : e));
+  }
+}
+/* App 回填自动填表结果 */
+function onOfficialResult(r){
+  if (r === 'CLICK' || r === 'EEOBJ') {
+    setStatus('已提交给学校官方登录页');
+    markLogin();
+  } else if (String(r).indexOf('NO') === 0 || String(r).indexOf('ERR') === 0) {
+    setStatus('官方页没能自动提交');
+    showResult('warn', '已打开学校官方登录页，但自动提交失败（' + esc(r) + '）。<br>请手动填账号密码后点登录。');
+  }
+}
+if (typeof window.onOfficialResult === 'undefined') window.onOfficialResult = onOfficialResult;
+
+/* 便于排障：把实际用到的 portal 参数列出来 */
+function portalBrief(){
+  normalizePortal();
+  var ks = [];
+  PORTAL_KEYS.forEach(function(k){ if (PORTAL[k]) ks.push(k + '=' + PORTAL[k]); });
+  return ks.join('&');
 }
 
 function parseRet(u){
